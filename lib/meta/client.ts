@@ -867,7 +867,7 @@ export async function subscribeInstagramAccountToWebhooks(
     // Instagram webhooks for Facebook-login apps arrive once the app is
     // installed on the linked Page.
     const url = new URL(`${facebookGraphBase()}/me/subscribed_apps`);
-    url.searchParams.set("subscribed_fields", "feed,messages,messaging_postbacks");
+    url.searchParams.set("subscribed_fields", "feed");
     url.searchParams.set("access_token", accessToken);
     return handleResponse(await fetch(url.toString(), { method: "POST" }));
   }
