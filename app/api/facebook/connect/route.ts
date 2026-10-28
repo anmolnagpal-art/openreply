@@ -43,6 +43,7 @@ export async function POST(request: NextRequest) {
   const form = await request.formData();
   const userToken = String(form.get("userToken") ?? "").trim();
   const wantedUsername = String(form.get("username") ?? "").trim().replace(/^@/, "").toLowerCase();
+  const pageId = String(form.get("pageId") ?? process.env.FACEBOOK_PAGE_ID ?? "").trim();
   if (!userToken) return back("Paste a token first");
 
   try {
@@ -59,7 +60,18 @@ export async function POST(request: NextRequest) {
       access_token: longLived.access_token,
     });
 
-    const withIg = pages.data.filter((p) => p.instagram_business_account && p.access_token);
+    let withIg = pages.data.filter((p) => p.instagram_business_account && p.access_token);
+
+    // New Pages Experience / business-asset Pages can be missing from
+    // me/accounts even though the token can read them. Fall back to a direct
+    // lookup by Page ID.
+    if (withIg.length === 0 && pageId) {
+      const direct = await graphGet<PageRow>(pageId, {
+        fields: "id,name,access_token,instagram_business_account{id,username,name}",
+        access_token: longLived.access_token,
+      });
+      if (direct.instagram_business_account && direct.access_token) withIg = [direct];
+    }
     const page =
       withIg.find((p) => p.instagram_business_account?.username?.toLowerCase() === wantedUsername) ??
       (wantedUsername ? undefined : withIg[0]);
