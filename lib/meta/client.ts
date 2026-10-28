@@ -1,7 +1,37 @@
 import { getMetaGraphApiVersion, requireEnv } from "@/lib/env";
 
+// Facebook-login mode: the account is connected with a Facebook Page access
+// token (linked to the Instagram professional account) instead of an
+// Instagram Login token. Calls then go to graph.facebook.com, messages are
+// sent from the Page (`me` with a Page token), and "me" lookups resolve the
+// Page's linked Instagram account. Enable with META_LOGIN_MODE=facebook.
+export function isFacebookLoginMode() {
+  return process.env.META_LOGIN_MODE === "facebook";
+}
+
 function instagramGraphBase() {
+  if (isFacebookLoginMode()) return facebookGraphBase();
   return `https://graph.instagram.com/${getMetaGraphApiVersion()}`;
+}
+
+// The node that sends Instagram messages: the IG account itself with
+// Instagram Login, the Page (`me` with a Page token) with Facebook Login.
+function messagingNode(instagramAccountId: string) {
+  return isFacebookLoginMode() ? "me" : instagramAccountId;
+}
+
+const linkedInstagramIdCache = new Map<string, string>();
+
+// In Facebook-login mode, resolve the Instagram account linked to the Page
+// whose token we hold. Instagram Login tokens just use `me`.
+async function mediaOwnerNode(accessToken: string): Promise<string> {
+  if (!isFacebookLoginMode()) return "me";
+  const cached = linkedInstagramIdCache.get(accessToken);
+  if (cached) return cached;
+  const info = await getUserInfo(accessToken);
+  const igId = info.user_id ?? info.id;
+  linkedInstagramIdCache.set(accessToken, igId);
+  return igId;
 }
 
 function facebookGraphBase() {
@@ -151,7 +181,7 @@ export async function sendPrivateReply(
   message: string
 ): Promise<{ recipient_id: string; message_id: string }> {
   const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+    `${instagramGraphBase()}/${messagingNode(instagramAccountId)}/messages`,
     {
       method: "POST",
       headers: {
@@ -183,7 +213,7 @@ export async function sendPrivateReplyWithButton(
   payload: string
 ): Promise<{ recipient_id: string; message_id: string }> {
   const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+    `${instagramGraphBase()}/${messagingNode(instagramAccountId)}/messages`,
     {
       method: "POST",
       headers: {
@@ -226,7 +256,7 @@ export async function sendDirectMessageWithButton(
   payload: string
 ): Promise<{ recipient_id: string; message_id: string }> {
   const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+    `${instagramGraphBase()}/${messagingNode(instagramAccountId)}/messages`,
     {
       method: "POST",
       headers: {
@@ -311,7 +341,7 @@ export async function sendPrivateReplyWithLinkButton(
   buttons: LinkButton[]
 ): Promise<{ recipient_id: string; message_id: string }> {
   const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+    `${instagramGraphBase()}/${messagingNode(instagramAccountId)}/messages`,
     {
       method: "POST",
       headers: {
@@ -348,7 +378,7 @@ export async function sendDirectMessage(
   message: string
 ): Promise<{ recipient_id: string; message_id: string }> {
   const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+    `${instagramGraphBase()}/${messagingNode(instagramAccountId)}/messages`,
     {
       method: "POST",
       headers: {
@@ -377,7 +407,7 @@ export async function sendDirectMessageWithLinkButton(
   buttons: LinkButton[]
 ): Promise<{ recipient_id: string; message_id: string }> {
   const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+    `${instagramGraphBase()}/${messagingNode(instagramAccountId)}/messages`,
     {
       method: "POST",
       headers: {
@@ -535,7 +565,7 @@ export async function getConversations(
   async function readPage(limit: number, requestedFields: string): Promise<Page> {
     // Never follow Meta's next URL: rebuild on our trusted host and carry the
     // token separately. A messages.paging cursor must never advance this list.
-    const url = new URL(`${instagramGraphBase()}/${igUserId}/conversations`);
+    const url = new URL(`${instagramGraphBase()}/${messagingNode(igUserId)}/conversations`);
     url.searchParams.set("platform", "instagram");
     url.searchParams.set("fields", requestedFields);
     url.searchParams.set("limit", String(limit));
@@ -617,6 +647,23 @@ export async function getConversationMessages(
 }
 
 export async function getUserInfo(accessToken: string): Promise<InstagramUser> {
+  if (isFacebookLoginMode()) {
+    const pageUrl = new URL(`${facebookGraphBase()}/me`);
+    pageUrl.searchParams.set(
+      "fields",
+      "id,instagram_business_account{id,username,name,profile_picture_url,followers_count}"
+    );
+    pageUrl.searchParams.set("access_token", accessToken);
+    const page = await handleResponse<{
+      id: string;
+      instagram_business_account?: Omit<InstagramUser, "user_id">;
+    }>(await fetch(pageUrl.toString()));
+    const ig = page.instagram_business_account;
+    if (!ig) {
+      throw new Error("This Facebook Page has no linked Instagram professional account");
+    }
+    return { ...ig, user_id: ig.id };
+  }
   const url = new URL(`${instagramGraphBase()}/me`);
   url.searchParams.set(
     "fields",
@@ -638,7 +685,7 @@ export async function getUserMedia(
   accessToken: string,
   limit = 25
 ): Promise<InstagramMedia[]> {
-  const url = new URL(`${instagramGraphBase()}/me/media`);
+  const url = new URL(`${instagramGraphBase()}/${await mediaOwnerNode(accessToken)}/media`);
   url.searchParams.set("fields", MEDIA_FIELDS);
   url.searchParams.set("limit", limit.toString());
   url.searchParams.set("access_token", accessToken);
@@ -660,7 +707,7 @@ export async function getAllUserMedia(
 ): Promise<InstagramMedia[]> {
   const results: InstagramMedia[] = [];
 
-  const first = new URL(`${instagramGraphBase()}/me/media`);
+  const first = new URL(`${instagramGraphBase()}/${await mediaOwnerNode(accessToken)}/media`);
   first.searchParams.set("fields", MEDIA_FIELDS);
   first.searchParams.set("limit", String(Math.min(MEDIA_PAGE_SIZE, max)));
   first.searchParams.set("access_token", accessToken);
@@ -816,6 +863,14 @@ export async function subscribeInstagramAccountToWebhooks(
   instagramAccountId: string,
   accessToken: string
 ): Promise<{ success: boolean }> {
+  if (isFacebookLoginMode()) {
+    // Instagram webhooks for Facebook-login apps arrive once the app is
+    // installed on the linked Page.
+    const url = new URL(`${facebookGraphBase()}/me/subscribed_apps`);
+    url.searchParams.set("subscribed_fields", "feed,messages,messaging_postbacks");
+    url.searchParams.set("access_token", accessToken);
+    return handleResponse(await fetch(url.toString(), { method: "POST" }));
+  }
   const response = await fetch(
     `${instagramGraphBase()}/${instagramAccountId}/subscribed_apps`,
     {
