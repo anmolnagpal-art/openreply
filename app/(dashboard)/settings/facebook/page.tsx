@@ -30,6 +30,10 @@ export default async function FacebookConnectPage({
           <input name="username" defaultValue="ailowdown" className="mt-1 w-full rounded border p-2" />
         </label>
         <label className="block text-sm">
+          Facebook Page ID (used if the Page is missing from the Pages list)
+          <input name="pageId" defaultValue="1399642523233032" className="mt-1 w-full rounded border p-2" />
+        </label>
+        <label className="block text-sm">
           User access token
           <input
             name="userToken"
